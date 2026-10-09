@@ -1,0 +1,603 @@
+// Rowmates data model. Ratings are stored as Int 1..10 (one unit = half a star).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum LogSource {
+  MANUAL
+  LETTERBOXD
+  IMDB
+}
+
+enum CircleKind {
+  DUO
+  CREW
+}
+
+enum CircleRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ScreeningLocation {
+  HOME
+  CINEMA
+  OTHER
+}
+
+enum ScreeningStatus {
+  PLANNED
+  WATCHED
+  REVEALED
+  CANCELLED
+}
+
+enum Rsvp {
+  GOING
+  MAYBE
+  DECLINED
+}
+
+enum PickStatus {
+  VOTING
+  DONE
+  CANCELLED
+}
+
+enum PickVoteValue {
+  YES
+  MAYBE
+  NO
+  VETO
+}
+
+enum Confidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ImportSource {
+  LETTERBOXD
+  IMDB
+}
+
+enum ImportStatus {
+  PENDING
+  RUNNING
+  NEEDS_REVIEW
+  DONE
+  FAILED
+}
+
+enum ImportRowKind {
+  DIARY
+  RATING
+  WATCHED
+  WATCHLIST
+  REVIEW
+  LIKE
+}
+
+enum ImportRowStatus {
+  PENDING
+  MATCHED
+  AMBIGUOUS
+  UNMATCHED
+  IMPORTED
+  SKIPPED
+}
+
+enum NotificationType {
+  CIRCLE_JOINED
+  SCREENING_PLANNED
+  SCREENING_LOGGED
+  REVEAL_READY
+  THREAD_REPLY
+  NEW_FOLLOWER
+  PICK_STARTED
+  COMPAT_ACCEPTED
+}
+
+enum ReportTarget {
+  USER
+  REVIEW
+  COMMENT
+}
+
+// ─── People ─────────────────────────────────────────────────────────────────
+
+model User {
+  id          String    @id @default(cuid())
+  clerkId     String    @unique
+  username    String    @unique
+  displayName String
+  avatarUrl   String?
+  bio         String?   @db.VarChar(280)
+  /// ISO 3166-1 alpha-2. Drives "where to watch" and Pick Night availability.
+  region      String    @default("US")
+  isPrivate   Boolean   @default(false)
+  onboardedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  logs               LogEntry[]
+  watchlist          WatchlistItem[]
+  favorites          FavoriteFilm[]
+  services           UserService[]
+  following          Follow[]              @relation("follower")
+  followers          Follow[]              @relation("followee")
+  blocking           Block[]               @relation("blocker")
+  blockedBy          Block[]               @relation("blocked")
+  reports            Report[]
+  memberships        CircleMember[]
+  circlesCreated     Circle[]
+  invitesCreated     CircleInvite[]
+  circleWatchlist    CircleWatchlistItem[]
+  hostedScreenings   Screening[]
+  attendances        ScreeningAttendee[]
+  hostedPicks        PickSession[]
+  pickParticipations PickParticipant[]
+  pickVotes          PickVote[]
+  comments           Comment[]
+  tasteProfile       TasteProfile?
+  compatAsA          Compatibility[]       @relation("compatA")
+  compatAsB          Compatibility[]       @relation("compatB")
+  compatInvitesSent  CompatInvite[]        @relation("compatInviter")
+  compatInvitesTaken CompatInvite[]        @relation("compatAccepter")
+  importJobs         ImportJob[]
+  notifications      Notification[]
+}
+
+model UserService {
+  userId       String
+  /// TMDB watch provider id.
+  providerId   Int
+  providerName String
+  logoPath     String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, providerId])
+}
+
+model Follow {
+  followerId String
+  followeeId String
+  createdAt  DateTime @default(now())
+
+  follower User @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followee User @relation("followee", fields: [followeeId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followeeId])
+  @@index([followeeId])
+}
+
+model Block {
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@id([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+model Report {
+  id         String       @id @default(cuid())
+  reporterId String
+  targetType ReportTarget
+  targetId   String
+  reason     String       @db.VarChar(500)
+  createdAt  DateTime     @default(now())
+  resolvedAt DateTime?
+
+  reporter User @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@index([targetType, targetId])
+}
+
+// ─── Films & diary ──────────────────────────────────────────────────────────
+
+/// Minimal local cache of TMDB metadata, filled when someone interacts with a film.
+model Film {
+  tmdbId           Int       @id
+  title            String
+  originalTitle    String?
+  year             Int?
+  posterPath       String?
+  backdropPath     String?
+  overview         String?
+  runtime          Int?
+  genres           Int[]
+  directors        String[]
+  originalLanguage String?
+  popularity       Float     @default(0)
+  voteAverage      Float?
+  detailsFetchedAt DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  logs            LogEntry[]
+  watchlistItems  WatchlistItem[]
+  favorites       FavoriteFilm[]
+  circleWatchlist CircleWatchlistItem[]
+  screenings      Screening[]
+  pickCandidates  PickCandidate[]
+  pickResults     PickSession[]
+  threads         Thread[]
+  externalIds     ExternalIdMap[]
+  importRows      ImportRow[]
+}
+
+model LogEntry {
+  id          String    @id @default(cuid())
+  userId      String
+  filmId      Int
+  watchedOn   DateTime? @db.Date
+  /// 1..10, one unit = half a star. Null = watched without rating.
+  rating      Int?
+  liked       Boolean   @default(false)
+  review      String?
+  hasSpoilers Boolean   @default(false)
+  isRewatch   Boolean   @default(false)
+  /// Set when the log belongs to a screening; hidden from others until the reveal.
+  screeningId String?
+  source      LogSource @default(MANUAL)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  film      Film       @relation(fields: [filmId], references: [tmdbId])
+  screening Screening? @relation(fields: [screeningId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, screeningId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, filmId])
+  @@index([filmId, createdAt(sort: Desc)])
+}
+
+model WatchlistItem {
+  userId  String
+  filmId  Int
+  addedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  film Film @relation(fields: [filmId], references: [tmdbId])
+
+  @@id([userId, filmId])
+  @@index([userId, addedAt(sort: Desc)])
+}
+
+model FavoriteFilm {
+  userId   String
+  /// 1..4
+  position Int
+  filmId   Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  film Film @relation(fields: [filmId], references: [tmdbId])
+
+  @@id([userId, position])
+  @@unique([userId, filmId])
+}
+
+// ─── Circles ────────────────────────────────────────────────────────────────
+
+model Circle {
+  id          String     @id @default(cuid())
+  name        String     @db.VarChar(60)
+  kind        CircleKind @default(CREW)
+  createdById String
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  createdBy   User                  @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  members     CircleMember[]
+  invites     CircleInvite[]
+  watchlist   CircleWatchlistItem[]
+  screenings  Screening[]
+  picks       PickSession[]
+  threads     Thread[]
+  compatDuels CompatInvite[]
+}
+
+model CircleMember {
+  circleId String
+  userId   String
+  role     CircleRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  circle Circle @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([circleId, userId])
+  @@index([userId])
+}
+
+model CircleInvite {
+  id          String   @id @default(cuid())
+  token       String   @unique
+  circleId    String
+  createdById String
+  expiresAt   DateTime
+  maxUses     Int?
+  uses        Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  circle    Circle @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  createdBy User   @relation(fields: [createdById], references: [id], onDelete: Cascade)
+}
+
+model CircleWatchlistItem {
+  circleId  String
+  filmId    Int
+  addedById String
+  addedAt   DateTime @default(now())
+
+  circle  Circle @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  film    Film   @relation(fields: [filmId], references: [tmdbId])
+  addedBy User   @relation(fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@id([circleId, filmId])
+}
+
+// ─── Screenings & the Blind Reveal ──────────────────────────────────────────
+
+model Screening {
+  id            String            @id @default(cuid())
+  circleId      String
+  filmId        Int
+  hostId        String
+  scheduledAt   DateTime?
+  watchedAt     DateTime?
+  location      ScreeningLocation @default(HOME)
+  venue         String?           @db.VarChar(120)
+  status        ScreeningStatus   @default(PLANNED)
+  revealedAt    DateTime?
+  pickSessionId String?           @unique
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  circle      Circle              @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  film        Film                @relation(fields: [filmId], references: [tmdbId])
+  host        User                @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  pickSession PickSession?        @relation(fields: [pickSessionId], references: [id], onDelete: SetNull)
+  attendees   ScreeningAttendee[]
+  logs        LogEntry[]
+
+  @@index([circleId, createdAt(sort: Desc)])
+}
+
+model ScreeningAttendee {
+  screeningId String
+  userId      String
+  rsvp        Rsvp     @default(GOING)
+  createdAt   DateTime @default(now())
+
+  screening Screening @relation(fields: [screeningId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([screeningId, userId])
+  @@index([userId])
+}
+
+// ─── Pick Night ─────────────────────────────────────────────────────────────
+
+model PickSession {
+  id           String     @id @default(cuid())
+  circleId     String
+  hostId       String
+  status       PickStatus @default(VOTING)
+  /// { maxRuntime?: number, genres?: number[], onlyStreamable: boolean, allowRewatch: boolean }
+  filters      Json
+  region       String
+  resultFilmId Int?
+  createdAt    DateTime   @default(now())
+  closedAt     DateTime?
+
+  circle       Circle            @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  host         User              @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  resultFilm   Film?             @relation(fields: [resultFilmId], references: [tmdbId])
+  participants PickParticipant[]
+  candidates   PickCandidate[]
+  votes        PickVote[]
+  screening    Screening?
+
+  @@index([circleId, createdAt(sort: Desc)])
+}
+
+model PickParticipant {
+  sessionId   String
+  userId      String
+  joinedAt    DateTime  @default(now())
+  submittedAt DateTime?
+
+  session PickSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([sessionId, userId])
+}
+
+model PickCandidate {
+  sessionId String
+  filmId    Int
+  score     Float
+  /// string[] of human-readable reasons, e.g. "On 3 of 4 watchlists".
+  reasons   Json
+  position  Int
+
+  session PickSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  film    Film        @relation(fields: [filmId], references: [tmdbId])
+
+  @@id([sessionId, filmId])
+}
+
+model PickVote {
+  sessionId String
+  filmId    Int
+  userId    String
+  value     PickVoteValue
+  createdAt DateTime      @default(now())
+
+  session PickSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([sessionId, filmId, userId])
+}
+
+// ─── Spoiler-locked discussions ─────────────────────────────────────────────
+
+model Thread {
+  id             String   @id @default(cuid())
+  circleId       String
+  filmId         Int
+  createdAt      DateTime @default(now())
+  lastActivityAt DateTime @default(now())
+
+  circle   Circle    @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  film     Film      @relation(fields: [filmId], references: [tmdbId])
+  comments Comment[]
+
+  @@unique([circleId, filmId])
+}
+
+model Comment {
+  id        String    @id @default(cuid())
+  threadId  String
+  authorId  String
+  body      String    @db.VarChar(2000)
+  createdAt DateTime  @default(now())
+  editedAt  DateTime?
+  deletedAt DateTime?
+
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+}
+
+// ─── Taste ──────────────────────────────────────────────────────────────────
+
+model TasteProfile {
+  userId          String   @id
+  meanRating      Float
+  ratingCount     Int
+  /// Record<genreId, weight in [-1, 1]>
+  genreWeights    Json
+  /// Record<directorName, weight in [-1, 1]>
+  directorWeights Json
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Cached pairwise compatibility. userAId < userBId (lexicographic) to keep one row per pair.
+model Compatibility {
+  userAId     String
+  userBId     String
+  score       Int
+  confidence  Confidence
+  commonCount Int
+  highlights  Json
+  computedAt  DateTime   @default(now())
+
+  userA User @relation("compatA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB User @relation("compatB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@id([userAId, userBId])
+}
+
+model CompatInvite {
+  id           String    @id @default(cuid())
+  token        String    @unique
+  inviterId    String
+  acceptedById String?
+  circleId     String?
+  createdAt    DateTime  @default(now())
+  acceptedAt   DateTime?
+
+  inviter    User    @relation("compatInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  acceptedBy User?   @relation("compatAccepter", fields: [acceptedById], references: [id], onDelete: SetNull)
+  circle     Circle? @relation(fields: [circleId], references: [id], onDelete: SetNull)
+}
+
+// ─── Imports ────────────────────────────────────────────────────────────────
+
+model ImportJob {
+  id            String       @id @default(cuid())
+  userId        String
+  source        ImportSource
+  status        ImportStatus @default(PENDING)
+  totalRows     Int          @default(0)
+  importedRows  Int          @default(0)
+  ambiguousRows Int          @default(0)
+  unmatchedRows Int          @default(0)
+  error         String?
+  /// Lease so only one worker processes a job at a time.
+  lockedUntil   DateTime?
+  createdAt     DateTime     @default(now())
+  finishedAt    DateTime?
+
+  user User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rows ImportRow[]
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model ImportRow {
+  id         String          @id @default(cuid())
+  jobId      String
+  kind       ImportRowKind
+  /// Normalized row: { title, year, imdbId?, letterboxdUri?, rating?, watchedOn?, review?, rewatch?, liked? }
+  raw        Json
+  status     ImportRowStatus @default(PENDING)
+  filmId     Int?
+  /// Candidate films for AMBIGUOUS rows: { tmdbId, title, year, posterPath }[]
+  candidates Json?
+  createdAt  DateTime        @default(now())
+
+  job  ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  film Film?     @relation(fields: [filmId], references: [tmdbId])
+
+  @@index([jobId, status])
+}
+
+/// Global cache of external id -> TMDB id matches, shared by all imports.
+model ExternalIdMap {
+  source      ImportSource
+  externalKey String
+  filmId      Int
+  createdAt   DateTime     @default(now())
+
+  film Film @relation(fields: [filmId], references: [tmdbId])
+
+  @@id([source, externalKey])
+}
+
+// ─── Notifications ──────────────────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  payload   Json
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+}
